@@ -1,0 +1,4 @@
+- insert:
+    - id: dsh-zotero-paperbridge
+      name: dsh-zotero-paperbridge
+      config: {}

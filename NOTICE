@@ -1,0 +1,15 @@
+dsh-zotero-paperbridge third-party asset notice
+
+The JavaScript source, tests, and original documentation are MIT licensed.
+The official icon.png is excluded from the project MIT license.
+
+Asset: official Zotero application icon (unaltered original PNG)
+Source: https://www.zotero.org/support/_media/logo/zotero_256x256x32.png
+Brand terms: https://www.zotero.org/support/brand
+Zotero is a trademark of the Corporation for Digital Scholarship. Official artwork is used to identify the connected application; see the official brand and trademark terms.
+
+This is an independent DSH integration. Use of the official application icon
+identifies the application being connected and does not imply sponsorship,
+endorsement, or authorship by Zotero.
+
+SHA-256: 30c76a7a6441884df75567287db08ee40be6b763af7309f452a434800e069cd4

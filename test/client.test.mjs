@@ -1,0 +1,34 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import { createClient, normalizeDoi } from '../lib/client.js';
+const paper={DOI:'10.1234/test',title:['Real paper'],author:[{given:'Ada',family:'Lee'}],published:{'date-parts':[[2024,3,2]]},'container-title':['Journal'],abstract:'<jats:p>Source abstract</jats:p>',URL:'https://doi.org/10.1234/test'};
+async function mock(handler){const server=http.createServer(async(req,res)=>{let text='';for await(const c of req)text+=c;try{await handler(req,res,text?JSON.parse(text):null);}catch(e){res.statusCode=500;res.end(String(e));}});await new Promise(r=>server.listen(0,'127.0.0.1',r));const base=`http://127.0.0.1:${server.address().port}`;return{base,close:()=>new Promise(r=>server.close(r))};}
+function json(res,body,status=200){res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(body));}
+test('DOI normalizes URL and rejects fabricated identifiers',()=>{assert.equal(normalizeDoi('https://doi.org/10.1234/TEST'),'10.1234/test');assert.equal(normalizeDoi('not-a-doi'),'');});
+test('search then save uses original metadata, verified readback, and duplicate skip',async t=>{
+  let created=false,saves=0,importId='';const received=[];
+  const m=await mock((req,res,body)=>{received.push({url:req.url,method:req.method,body});
+    if(req.url.startsWith('/works'))return json(res,{message:{items:[paper],'total-results':1}});
+    if(req.url.startsWith('/api/users/0/items/top'))return json(res,created?[{key:'ABCDEFGH',data:{title:'Real paper',DOI:paper.DOI,collections:['COLLKEY1']}}]:[]);
+    if(req.url==='/connector/getSelectedCollection')return json(res,{id:1,libraryID:1,name:'Collection',editable:true,libraryEditable:true,targets:[{id:'L1',name:'Library'},{id:'C1',name:'Collection'}]});
+    if(req.url==='/api/users/0/items/ABCDEFGH')return json(res,{key:'ABCDEFGH',data:{title:'Real paper',DOI:paper.DOI,collections:['COLLKEY1'],extra:`DSH import ID: ${importId}`}});
+    if(req.url==='/connector/saveItems'){saves++;importId=body.sessionID;assert.equal(body.items[0].title,'Real paper');assert.equal(body.items[0].abstractNote,'Source abstract');assert.deepEqual(body.items[0].attachments,[]);assert.ok(body.sessionID);created=true;res.writeHead(201);return res.end();}
+    json(res,{},404);
+  });t.after(m.close);const c=createClient({localBaseUrl:m.base},{crossrefBase:m.base+'/works'});
+  const found=await c.search({query:'test',source:'crossref'});assert.equal(found.results[0].authors[0].lastName,'Lee');assert.equal(found.results[0].doi,'10.1234/test');
+  const args={candidateIds:[found.results[0].candidateId],expectedTarget:'C1',expectedCollectionKey:'COLLKEY1'};const first=await c.save(args);assert.equal(first.results[0].status,'saved');assert.equal(first.results[0].item.key,'ABCDEFGH');assert.equal(first.allVerified,true);
+  const second=await c.save(args);assert.equal(second.results[0].status,'duplicate');assert.equal(saves,1);assert.ok(received.find(x=>x.url.includes('qmode=everything')));
+});
+test('changed target prevents write',async t=>{let saves=0;const m=await mock((req,res)=>{if(req.url.startsWith('/works'))return json(res,{message:paper});if(req.url.startsWith('/api/'))return json(res,[]);if(req.url.includes('getSelected'))return json(res,{id:2,libraryID:1,editable:true,libraryEditable:true,targets:[{id:'C2'}]});saves++;json(res,{});});t.after(m.close);const c=createClient({localBaseUrl:m.base},{crossrefBase:m.base+'/works'});const r=await c.save({identifiers:[paper.DOI],expectedTarget:'C1'});assert.equal(r.results[0].error.code,'TARGET_CHANGED');assert.equal(saves,0);});
+test('partial provider failure remains visible',async t=>{const m=await mock((req,res)=>req.url.startsWith('/works')?json(res,{message:{items:[paper]}}):json(res,{},503));t.after(m.close);const c=createClient({localBaseUrl:m.base},{crossrefBase:m.base+'/works',europeBase:m.base+'/europe'});const r=await c.search({query:'test'});assert.equal(r.results.length,1);assert.equal(r.warnings[0].code,'HTTP_503');});
+test('invalid candidate resolves before any mutation',async t=>{let writes=0;const m=await mock((req,res)=>{if(req.method==='POST')writes++;json(res,[]);});t.after(m.close);const c=createClient({localBaseUrl:m.base});await assert.rejects(c.save({candidateIds:['missing']}),{code:'CANDIDATE_EXPIRED'});assert.equal(writes,0);});
+test('POST network loss is outcome_unknown and never retried',async t=>{let writes=0;const m=await mock((req,res)=>{if(req.url.startsWith('/works'))return json(res,{message:paper});if(req.url.startsWith('/api/'))return json(res,[]);if(req.url.includes('getSelected'))return json(res,{libraryID:1,editable:true,libraryEditable:true,targets:[{id:'L1'}]});writes++;req.socket.destroy();});t.after(m.close);const c=createClient({localBaseUrl:m.base},{crossrefBase:m.base+'/works'});const r=await c.save({identifiers:[paper.DOI]});assert.equal(r.results[0].status,'outcome_unknown');assert.equal(writes,1);});
+test('Web API writes only authoritative metadata, key stays off provider requests',async()=>{
+  const calls=[];const transport=async(url,opts)=>{calls.push({url,opts});if(url.startsWith('https://api.crossref.org/'))return Response.json({message:paper});if(url.includes('/items/top?'))return Response.json([]);if(url.includes('/items/new?'))return Response.json({itemType:'journalArticle',title:'',creators:[],DOI:'',date:'',publicationTitle:'',url:'',abstractNote:'',tags:[],collections:[],extra:'',relations:{}});if(opts.method==='POST')return Response.json({successful:{'0':{key:'ABCDEFGH'}}});return Response.json({key:'ABCDEFGH',data:{DOI:paper.DOI,title:'Real paper',collections:['COLLKEY1']}});};
+  const c=createClient({backend:'web',libraryId:'123'},{fetch:transport,resolveCredential:async()=> 'secret-token'});const r=await c.save({identifiers:[paper.DOI],collectionKeys:['COLLKEY1']});assert.equal(r.results[0].status,'saved');
+  assert.equal(calls[0].opts.headers['Zotero-API-Key'],undefined);assert.equal(calls.find(x=>x.opts.method==='POST').opts.headers['Zotero-API-Key'],'secret-token');
+  assert.ok(!JSON.stringify(r).includes('secret-token'));assert.deepEqual(JSON.parse(calls.find(x=>x.opts.method==='POST').opts.body)[0].collections,['COLLKEY1']);
+});
+test('non-loopback local URLs and invalid keys rejected',()=>{assert.throws(()=>createClient({localBaseUrl:'http://example.com'}),{code:'INVALID_LOCAL_URL'});const c=createClient();assert.rejects(c.get('../secret'),{code:'INVALID_KEY'});});
+test('response byte cap protects client',async t=>{const m=await mock((req,res)=>json(res,{message:{items:[{...paper,abstract:'X'.repeat(10000)}]}}));t.after(m.close);const c=createClient({localBaseUrl:m.base,maxResponseBytes:1000},{crossrefBase:m.base+'/works'});await assert.rejects(c.search({query:'x',source:'crossref'}),{code:'SEARCH_FAILED'});});
